@@ -15,7 +15,25 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    return list()
+    links = list()
+    # TODO: parse web response
+        # track longest page based on number of words
+        # generate total (across domains) list of common words ordered by frequency
+    if(resp.status != 200):
+        print(resp.status + " status at " + resp.url + " : " + resp.error)
+        return links
+    # TODO: extract information from page
+        # only urls within domains/paths of
+            # *.ics.uci.edu/*
+            # *.cs.uci.edu/*  
+            # *.informatics.uci.edu/* 
+            # *.stat.uci.edu/* 
+        # discard fragment part of url
+        # track subdomains of uci.edu and number of unique pages in each
+            # listed alphabetically
+            # format: subdomain, number
+    print(resp.raw_response.content)
+    return links
 
 def is_valid(url):
     # Decide whether to crawl this url or not. 
