@@ -1,6 +1,18 @@
 import re
 from urllib.parse import urlparse
 
+VISITED = set()
+SIMHASHES = list()
+SUBDOMAINS = dict()
+WORD_FREQ = dict()
+LONGEST_PAGE = ["", 0]
+BLACKLIST = set()
+
+DOMAINS = [".ics.uci.edu/",
+           ".cs.uci.edu/",
+           ".informatics.uci.edu/",
+           ".stat.uci.edu/"]
+
 def scraper(url, resp):
     links = extract_next_links(url, resp)
     return [link for link in links if is_valid(link)]
@@ -15,13 +27,15 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
+    global VISITED
     links = list()
     # TODO: parse web response
         # track longest page based on number of words
         # generate total (across domains) list of common words ordered by frequency
-    if(resp.status != 200):
+    if(url in VISITED or resp.status != 200):
         print(resp.status + " status at " + resp.url + " : " + resp.error)
         return links
+    
     # TODO: extract information from page
         # only urls within domains/paths of
             # *.ics.uci.edu/*
