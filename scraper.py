@@ -4,11 +4,11 @@ from lxml import html, etree
 import time
 from simhash import Simhash, SimhashIndex
 import json
+from utils import get_logger
 
-
+LOGGER = get_logger("SCRAPER")
 VISITED = set()
-SIMHASHES = dict()
-HASH_INDEX = SimhashIndex(k=3)
+HASH_INDEX = SimhashIndex({}, k=3)
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
@@ -46,8 +46,9 @@ STOP_WORDS = ["&", "a", "about", "above", "after", "again", "against", "all",
 
 
 def scraper(url, resp):
+    global LOGGER
     links = extract_next_links(url, resp)
-    print(f"[DEBUG] {url} produced {len(links)} links")
+    LOGGER.debug(f"{url} produced {len(links)} links")
 
     time.sleep(0.5)
     valid_links = []
@@ -70,10 +71,11 @@ def extract_next_links(url, resp):
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
     global VISITED, BLACKLIST, LONGEST_PAGE, STOP_WORDS, WORD_FREQ,  \
-        REPORT_FILENAME, LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, SIMHASHES, HASH_INDEX
+        REPORT_FILENAME, LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, \
+        HASH_INDEX, LOGGER
     
 
-    print(urldefrag(url)[0])
+    LOGGER.info("Extracting : " + urldefrag(url)[0])
     try:
         with open("visited.txt", "r+") as f:
             if len(VISITED) == 0:
@@ -94,14 +96,15 @@ def extract_next_links(url, resp):
                     with open("blacklist.txt", 'r') as f:
                         file_content = f.read().splitlines()
                         BLACKLIST =  set(file_content)
-                    with open("simhashes.json", "r+") as f:
-                        SIMHASHES = json.load(f)
-                        HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in SIMHASHES])
+                    # load simhashes
+                    with open("simhashes.json", "r") as f:
+                        simhashes = dict(json.load(f))
+                        HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in simhashes])
                 except FileNotFoundError:
                     pass
             print(VISITED)
             if(urldefrag(url)[0] in VISITED or url in BLACKLIST or resp.status != 200):
-                print(str(resp.status) + " status at " + resp.url + " : " + resp.error)
+                LOGGER.debug(str(resp.status) + " status at " + resp.url + " : " + resp.error)
                 return list()
             VISITED.add(urldefrag(url)[0])
             f.write(urldefrag(url)[0] + "\n")            
@@ -113,9 +116,9 @@ def extract_next_links(url, resp):
     byte_count = len(content)
     if byte_count > 10000000:
         # discord says 10MB is a lot
-        print("File size too large : " + str(byte_count))
+        LOGGER.debug(f"File {url} size too large : " + str(byte_count))
         return list()
-    print("URL has " + str(byte_count) + " bytes")
+    LOGGER.info("URL has " + str(byte_count) + " bytes")
 
     # parse with lxml
     tree = html.fromstring(content)
@@ -123,20 +126,23 @@ def extract_next_links(url, resp):
     
     text_content = tree.text_content()
     current_hash = Simhash(text_content)
-    if(HASH_INDEX.get_near_dups(current_hash)):
+    if HASH_INDEX.get_near_dups(current_hash):
         return list()
+    HASH_INDEX.add(url, current_hash)
+    with open("simhashes.json", "w") as f:
+        json.dump({urldefrag(url)[0]: current_hash})
     
     # track longest page based on number of words
     words = text_content.split()
     word_count = len(words)
-    if word_count == 0:
-        return list()
-    if word_count < 100:
+    # if word_count == 0:
+    #     return list()
+    if word_count <= 100:
         # probably insignificant data
         return list()
     if word_count > LONGEST_PAGE[1]:
         LONGEST_PAGE = [url, word_count]
-    print("URL has " + str(word_count) + " words")
+    LOGGER.info("URL has " + str(word_count) + " words")
     
     # generate total (across domains) list of common words ordered by frequency
     for word in words:
@@ -173,9 +179,10 @@ def extract_next_links(url, resp):
             json.dump(WORD_FREQ, f2)
             json.dump(SUBDOMAINS, f3)
     LINKS_PARSED += 1
+
     # get links
     links = set([urljoin(url, link) for link in tree.xpath('//a/@href')])
-    
+
     # count link frequency
     # CURRENT_LINKS.clear()
     # for link in links:
