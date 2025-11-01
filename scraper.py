@@ -1,5 +1,6 @@
 import re
 from urllib.parse import urlparse
+import lxml
 
 VISITED = set()
 SIMHASHES = list()
@@ -27,35 +28,40 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    global VISITED
-    links = list()
-    # TODO: parse web response
+    global VISITED, BLACKLIST
+    # TODO:
         # track longest page based on number of words
         # generate total (across domains) list of common words ordered by frequency
-    if(url in VISITED or resp.status != 200):
+    if(url in VISITED or url in BLACKLIST or resp.status != 200):
         print(resp.status + " status at " + resp.url + " : " + resp.error)
-        return links
+        return list()
     
-    # TODO: extract information from page
-        # only urls within domains/paths of
-            # *.ics.uci.edu/*
-            # *.cs.uci.edu/*  
-            # *.informatics.uci.edu/* 
-            # *.stat.uci.edu/* 
+    content = resp.raw_response.content
+    tree = lxml.html.fromstring(content)
+    links = tree.xpath('//a/@href')
+
+    # TODO:
         # discard fragment part of url
         # track subdomains of uci.edu and number of unique pages in each
             # listed alphabetically
             # format: subdomain, number
-    print(resp.raw_response.content)
-    return links
+    result = list()
+    for link in links:
+        print(link)
+        if is_valid(link):
+            result.append(link)
+    
+    return result
 
 def is_valid(url):
     # Decide whether to crawl this url or not. 
     # If you decide to crawl it, return True; otherwise return False.
     # There are already some conditions that return False.
+    global DOMAINS
+    
     try:
         parsed = urlparse(url)
-        if parsed.scheme not in set(["http", "https"]):
+        if parsed.scheme not in set(["http", "https"] or parsed.hostname not in DOMAINS):
             return False
         return not re.match(
             r".*\.(css|js|bmp|gif|jpe?g|ico"
