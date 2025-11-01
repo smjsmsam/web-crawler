@@ -108,3 +108,13 @@ venv.bak/
 
 *.full.py
 *.shelve
+
+pp.py
+test.py
+report.txt
+visited.txt
+longest-page.json
+word-frequencies.json
+subdomains.json
+blacklist.txt
+simhashes.json
