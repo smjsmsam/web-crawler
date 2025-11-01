@@ -5,7 +5,7 @@ from lxml import html, etree
 from urllib.parse import urlparse
 
 
-url = "https://ics.uci.edu/"
+url = "https://stat.uci.edu/"
 
 DOMAINS = ["ics.uci.edu",
            "cs.uci.edu",
@@ -47,9 +47,14 @@ if __name__ == "__main__":
     print(resp.status_code)
 
     # print(resp.content)
+    
     tree = html.fromstring(resp.content)
+    etree.strip_elements(tree, 'script', 'style', 'template', 'meta', 'svg', 'embed', 'object', 'iframe', 'canvas', 'img')
     links = tree.xpath('//a/@href')
+    text_content = tree.text_content()
+    words = text_content.split()
+    print(words)
     # print(links)
-    for link in links:
-        if is_valid(link):
-            print(link)
+    # for link in links:
+    #     if is_valid(link):
+            # print(link)

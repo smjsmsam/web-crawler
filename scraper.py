@@ -1,11 +1,14 @@
 import re
-from utils import get_logger
-from urllib.parse import urlparse, urldefrag
-from lxml import html
+from urllib.parse import urljoin, urlparse, urldefrag
+from lxml import html, etree
+import time
+from simhash import Simhash, SimhashIndex
+import json
 
-LOGGER = get_logger("SCRAPER")
+
 VISITED = set()
-SIMHASHES = list()
+SIMHASHES = dict()
+HASH_INDEX = SimhashIndex(k=3)
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
@@ -20,7 +23,7 @@ DOMAINS = ["ics.uci.edu",
            "informatics.uci.edu",
            "stat.uci.edu"]
 
-STOP_WORDS = ["a", "about", "above", "after", "again", "against", "all",
+STOP_WORDS = ["&", "a", "about", "above", "after", "again", "against", "all",
             "am", "an", "and", "any", "are", "aren", "t", "as", "at",
             "be", "because", "been", "before", "being", "below", "between",
             "both", "but", "by", "can", "not", "cannot", "could",
@@ -43,12 +46,17 @@ STOP_WORDS = ["a", "about", "above", "after", "again", "against", "all",
 
 
 def scraper(url, resp):
-    get_logger("").error("HELLO????")
-    global LOGGER
-    LOGGER.error("HELLO????")
-    print("hello???")
     links = extract_next_links(url, resp)
-    return [urldefrag(link)[0] for link in links if is_valid(link)]
+    print(f"[DEBUG] {url} produced {len(links)} links")
+
+    time.sleep(0.5)
+    valid_links = []
+    for link in links:
+        if is_valid(link) and link != url:
+            valid_links.append(urldefrag(link)[0])
+    print(valid_links)
+    return valid_links
+    # return [urldefrag(link)[0] for link in links if is_valid(link)]
 
 
 def extract_next_links(url, resp):
@@ -62,34 +70,74 @@ def extract_next_links(url, resp):
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
     global VISITED, BLACKLIST, LONGEST_PAGE, STOP_WORDS, WORD_FREQ,  \
-        REPORT_FILENAME, LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, LOGGER
+        REPORT_FILENAME, LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, SIMHASHES, HASH_INDEX
     
-    #TODO: politeness
-    if(urldefrag(url)[0] in VISITED or url in BLACKLIST or resp.status != 200):
-        LOGGER.info(resp.status + " status at " + resp.url + " : " + resp.error)
-        print(resp.status + " status at " + resp.url + " : " + resp.error)
-        return list()
-    VISITED.append(urldefrag(url)[0])
-    LOGGER.info(url)
-    print(url)
-    #TODO: avoid crawling large files
-    # parse with lxml
+
+    print(urldefrag(url)[0])
+    try:
+        with open("visited.txt", "r+") as f:
+            if len(VISITED) == 0:
+                # load visited from backup file
+                for line in f:
+                    VISITED.add(line.rstrip())
+                try:
+                    # load longest page from backup file
+                    with open("longest-page.json", "r") as f:
+                        LONGEST_PAGE = json.load(f)
+                    # load word frequencies
+                    with open("word-frequencies.json", "r") as f:
+                        WORD_FREQ = json.load(f)
+                    # load subdomains
+                    with open("subdomains.json", 'r') as f:
+                        SUBDOMAINS = json.load(f)
+                    # load blacklist
+                    with open("blacklist.txt", 'r') as f:
+                        file_content = f.read().splitlines()
+                        BLACKLIST =  set(file_content)
+                    with open("simhashes.json", "r+") as f:
+                        SIMHASHES = json.load(f)
+                        HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in SIMHASHES])
+                except FileNotFoundError:
+                    pass
+            print(VISITED)
+            if(urldefrag(url)[0] in VISITED or url in BLACKLIST or resp.status != 200):
+                print(str(resp.status) + " status at " + resp.url + " : " + resp.error)
+                return list()
+            VISITED.add(urldefrag(url)[0])
+            f.write(urldefrag(url)[0] + "\n")            
+    except FileNotFoundError:
+        pass
+    
+    # avoid crawling large files
     content = resp.raw_response.content
     byte_count = len(content)
-    
-    tree = html.fromstring(content)
+    if byte_count > 10000000:
+        # discord says 10MB is a lot
+        print("File size too large : " + str(byte_count))
+        return list()
+    print("URL has " + str(byte_count) + " bytes")
 
-    #TODO: simhash
-    # track longest page based on number of words
+    # parse with lxml
+    tree = html.fromstring(content)
+    etree.strip_elements(tree, 'script', 'style', 'template', 'meta', 'svg', 'embed', 'object', 'iframe', 'canvas', 'img')
+    
     text_content = tree.text_content()
+    current_hash = Simhash(text_content)
+    if(HASH_INDEX.get_near_dups(current_hash)):
+        return list()
+    
+    # track longest page based on number of words
     words = text_content.split()
     word_count = len(words)
     if word_count == 0:
         return list()
+    if word_count < 100:
+        # probably insignificant data
+        return list()
     if word_count > LONGEST_PAGE[1]:
         LONGEST_PAGE = [url, word_count]
-    LOGGER.info(word_count)
-    print(word_count)
+    print("URL has " + str(word_count) + " words")
+    
     # generate total (across domains) list of common words ordered by frequency
     for word in words:
         if word not in STOP_WORDS:
@@ -97,10 +145,10 @@ def extract_next_links(url, resp):
             if val == None:
                 WORD_FREQ[word] = 1
             else:
-                WORD_FREQ[word] += 1    
+                WORD_FREQ[word] += 1
     
-    # write report every 10 links parsed
-    if LINKS_PARSED % 10 == 0:
+    # write report every n links parsed
+    if LINKS_PARSED % 1 == 0:
         with open(REPORT_FILENAME, 'w') as f:
             f.write(f"Unique Pages: {len(VISITED)}\n")
             f.write("-----------\n")
@@ -115,23 +163,29 @@ def extract_next_links(url, resp):
             f.write("-----------\n")
             f.write(f"50 Most Common Words:\n\n")
             WORD_FREQ = sorted_frequency(WORD_FREQ)
-            for key in WORD_FREQ.keys():
+            for key in list(WORD_FREQ.keys())[:50]:
                 f.write(f"{key}\n")
-
+        with open("longest-page.json", 'w') as f1, \
+            open("word-frequencies.json", 'w') as f2, \
+            open("subdomains.json", 'w') as f3:
+            
+            json.dump(LONGEST_PAGE, f1)
+            json.dump(WORD_FREQ, f2)
+            json.dump(SUBDOMAINS, f3)
+    LINKS_PARSED += 1
     # get links
-    links = tree.xpath('//a/@href')
-    LOGGER.info(links)
-    print(links)
+    links = set([urljoin(url, link) for link in tree.xpath('//a/@href')])
+    
     # count link frequency
-    CURRENT_LINKS.clear()
-    for link in links:
-        val = CURRENT_LINKS.get(link)
-        if val == None:
-            CURRENT_LINKS[link] = 1
-        else:
-            CURRENT_LINKS[link] += 1
+    # CURRENT_LINKS.clear()
+    # for link in links:
+    #     val = CURRENT_LINKS.get(link)
+    #     if val == None:
+    #         CURRENT_LINKS[link] = 1
+    #     else:
+    #         CURRENT_LINKS[link] += 1
 
-    return links
+    return list(links)
 
 
 def is_valid(url):
@@ -152,12 +206,12 @@ def is_valid(url):
                 + r"|epub|dll|cnf|tgz|sha1"
                 + r"|thmx|mso|arff|rtf|jar|csv"
                 + r"|rm|smil|wmv|swf|wma|zip|rar|gz)$", parsed.path.lower()) \
-            or not any(parsed.hostname in domain for domain in DOMAINS):
+            or not any(parsed.hostname and parsed.hostname.endswith(domain) for domain in DOMAINS):
             return False
         
         # track subdomains of uci.edu and number of unique pages in each
         if parsed.hostname not in DOMAINS:
-            if not SUBDOMAINS[parsed.hostname]:
+            if parsed.hostname not in SUBDOMAINS:
                 SUBDOMAINS[parsed.hostname] = set()
             SUBDOMAINS[parsed.hostname].add(urldefrag(url)[0])
         return True
@@ -168,7 +222,7 @@ def is_valid(url):
 
 
 def sorted_frequency(dictionary):
-    return sorted(dictionary.items(), key=lambda item: item[1], reverse=True)
+    return dict(sorted(dictionary.items(), key=lambda item: item[1], reverse=True))
 
 
 def sorted_alphabetical(dictionary):
