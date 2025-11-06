@@ -9,7 +9,8 @@ from utils import get_logger
 
 LOGGER = get_logger("SCRAPER")
 VISITED = set()
-HASH_INDEX = SimhashIndex({}, k=3)
+HASH_DICT = {}
+HASH_INDEX = SimhashIndex({}, k=5)
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
@@ -49,7 +50,7 @@ STOP_WORDS = ["a", "about", "above", "after", "again", "against", "all",
 def scraper(url, resp):
     global LOGGER
     links = extract_next_links(url, resp)
-    LOGGER.debug(f"{url} produced {len(links)} links")
+    LOGGER.info(f"URL produced {len(links)} links")
 
     time.sleep(0.5)
     valid_links = []
@@ -72,7 +73,7 @@ def extract_next_links(url, resp):
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
     global VISITED, BLACKLIST, LONGEST_PAGE, STOP_WORDS, WORD_FREQ,  \
-        LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, HASH_INDEX, LOGGER
+        LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, HASH_DICT, HASH_INDEX, LOGGER
     
 
     LOGGER.info("Extracting : " + urldefrag(url)[0])
@@ -84,9 +85,14 @@ def extract_next_links(url, resp):
                 no_visits = True
                 for line in f:
                     VISITED.add(line.rstrip())
-            print(VISITED)
-            if(urldefrag(url)[0] in VISITED or url in BLACKLIST or resp.status != 200):
-                LOGGER.debug(f"{resp.status} status at {resp.url} : {resp.error}")
+            # print(VISITED)
+            if(urldefrag(url)[0] in VISITED):
+                LOGGER.info("URL has been visited, skipping")
+                return list()
+            if(urlparse(url).hostname in BLACKLIST):
+                LOGGER.info("URL in blacklist, skipping")
+            if(resp.status != 200):
+                LOGGER.info(f"{resp.status} status at {resp.url} : {resp.error}")
                 return list()
             f.write(urldefrag(url)[0] + "\n")            
     except FileNotFoundError:
@@ -119,8 +125,8 @@ def extract_next_links(url, resp):
         try:
             # load simhashes
             with open("simhashes.json", "r") as f5:
-                simhashes = dict(json.load(f5))
-                HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in simhashes.items()])
+                HASH_DICT = dict(json.load(f5))
+                HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in HASH_DICT.items()])
         except FileNotFoundError:
             pass
 
@@ -128,17 +134,16 @@ def extract_next_links(url, resp):
     try:
         content = resp.raw_response.content
     except Exception as e:
-        LOGGER.debug(f"No content from page: {url}; Exception: {e}")
-        print(f"No content from page: {url}; Exception: {e}")
+        LOGGER.info(f"No content: {e}")
         return list()
     byte_count = len(content)
     if byte_count > 10000000:
         # discord says 10MB is a lot
-        LOGGER.debug(f"File {url} size too large : " + str(byte_count))
+        LOGGER.info(f"File size too large : " + str(byte_count))
         return list()
-    if byte_count < 100:
+    if byte_count < 1000:
         # either empty or uselessly small amount of content
-        LOGGER.debug(f"File {url} size too small : " + str(byte_count))
+        LOGGER.info(f"File size too small : " + str(byte_count))
         return list()
     LOGGER.info("URL has " + str(byte_count) + " bytes")
 
@@ -150,10 +155,11 @@ def extract_next_links(url, resp):
     current_hash = Simhash(text_content)
     if HASH_INDEX.get_near_dups(current_hash):
         HASH_INDEX.add(url, current_hash)
+        HASH_DICT[urldefrag(url)[0]] = current_hash.value
+        LOGGER.info("URL is similar to another")
         return list()
     HASH_INDEX.add(url, current_hash)
-    with open("simhashes.json", "w") as f:
-        json.dump({urldefrag(url)[0]: current_hash.value}, f)
+    HASH_DICT[urldefrag(url)[0]] = current_hash.value
     
     # track longest page based on number of words
     words = text_content.split()
@@ -217,8 +223,8 @@ def is_valid(url):
                 SUBDOMAINS[parsed.hostname] = set()
             SUBDOMAINS[parsed.hostname].add(urldefrag(url)[0])
             if len(SUBDOMAINS[parsed.hostname]) > MAX_PAGES_PER_SUBDOMAIN:
-                BLACKLIST.add(urldefrag(url)[0])
-                print(f"Added {parsed.hostname} to the blacklist.")
+                BLACKLIST.add(parsed.hostname)
+                LOGGER.info(f"Added {parsed.hostname} to the blacklist.")
                 return False
         return True
 
@@ -269,3 +275,6 @@ def write_report():
     with open("visited.txt", 'w') as f5:
         for link in VISITED:
             f5.write(link + "\n")
+
+    with open("simhashes.json", "w") as f:
+        json.dump(HASH_DICT, f)
