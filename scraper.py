@@ -16,7 +16,7 @@ LONGEST_PAGE = ["", 0]
 BLACKLIST = set()
 CURRENT_LINKS = dict()
 LINKS_PARSED = 0
-
+MAX_PAGES_PER_SUBDOMAIN = 200
 
 
 DOMAINS = ["ics.uci.edu",
@@ -120,7 +120,7 @@ def extract_next_links(url, resp):
             # load simhashes
             with open("simhashes.json", "r") as f5:
                 simhashes = dict(json.load(f5))
-                HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in simhashes])
+                HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in simhashes.items()])
         except FileNotFoundError:
             pass
 
@@ -135,6 +135,10 @@ def extract_next_links(url, resp):
     if byte_count > 10000000:
         # discord says 10MB is a lot
         LOGGER.debug(f"File {url} size too large : " + str(byte_count))
+        return list()
+    if byte_count < 100:
+        # either empty or uselessly small amount of content
+        LOGGER.debug(f"File {url} size too small : " + str(byte_count))
         return list()
     LOGGER.info("URL has " + str(byte_count) + " bytes")
 
@@ -212,6 +216,10 @@ def is_valid(url):
             if parsed.hostname not in SUBDOMAINS:
                 SUBDOMAINS[parsed.hostname] = set()
             SUBDOMAINS[parsed.hostname].add(urldefrag(url)[0])
+            if len(SUBDOMAINS[parsed.hostname]) > MAX_PAGES_PER_SUBDOMAIN:
+                BLACKLIST.add(urldefrag(url)[0])
+                print(f"Added {parsed.hostname} to the blacklist.")
+                return False
         return True
 
     except TypeError:
@@ -249,8 +257,15 @@ def write_report():
     
     with open("longest-page.json", 'w') as f1, \
         open("word-frequencies.json", 'w') as f2, \
-        open("subdomains.json", 'w') as f3:
+        open("subdomains.json", 'w') as f3, \
+        open("blacklist.txt", 'w') as f4:
         
         json.dump(LONGEST_PAGE, f1)
         json.dump(WORD_FREQ, f2)
-        json.dump(list(SUBDOMAINS), f3)
+        json.dump({k: list(v) for k, v in SUBDOMAINS.items()}, f3)
+        for link in BLACKLIST:
+            f4.write(link + "\n")
+    
+    with open("visited.txt", 'w') as f5:
+        for link in VISITED:
+            f5.write(link + "\n")
