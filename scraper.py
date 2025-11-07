@@ -1,3 +1,5 @@
+import atexit
+from itertools import groupby
 import re
 from urllib.parse import urljoin, urlparse, urldefrag
 from lxml import html, etree
@@ -5,6 +7,7 @@ import time
 from simhash import Simhash, SimhashIndex
 import json
 from utils import get_logger
+import numpy as np
 
 
 LOGGER = get_logger("SCRAPER")
@@ -14,10 +17,8 @@ HASH_INDEX = SimhashIndex({}, k=3)
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
-BLACKLIST = set()
-CURRENT_LINKS = dict()
 LINKS_PARSED = 0
-MAX_PAGES_PER_SUBDOMAIN = 200
+LOADED_DATA = False
 
 
 DOMAINS = ["ics.uci.edu",
@@ -46,20 +47,21 @@ STOP_WORDS = ["a", "about", "above", "after", "again", "against", "all",
             "while", "who", "whom", "why", "with", "won", "would",
             "wouldn", "you", "your", "yours", "yourself", "yourselves"]
 
+BLACKLIST_PATH = ["doku.php", "eppstein/pix"]
 
 def scraper(url, resp):
     global LOGGER
-    links = extract_next_links(url, resp)
+    defragged = urldefrag(url)[0]
+    links = extract_next_links(defragged, resp)
     LOGGER.info(f"URL produced {len(links)} links")
 
     time.sleep(0.5)
     valid_links = []
     for link in links:
-        if is_valid(link) and link != url:
-            valid_links.append(urldefrag(link)[0])
-    # print(valid_links)
+        defrag = urldefrag(link)[0]
+        if is_valid(defrag) and defrag != url:
+            valid_links.append(defrag)
     return valid_links
-    # return [urldefrag(link)[0] for link in links if is_valid(link)]
 
 
 def extract_next_links(url, resp):
@@ -72,64 +74,27 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    global VISITED, BLACKLIST, LONGEST_PAGE, STOP_WORDS, WORD_FREQ,  \
-        LINKS_PARSED, SUBDOMAINS, CURRENT_LINKS, HASH_DICT, HASH_INDEX, LOGGER
+    global VISITED, LONGEST_PAGE, STOP_WORDS, WORD_FREQ,  \
+        LINKS_PARSED, SUBDOMAINS, HASH_DICT, HASH_INDEX, LOGGER
     
+    if LOADED_DATA == False and len(VISITED) == 0:
+        load_data()
 
-    LOGGER.info("Extracting : " + urldefrag(url)[0])
-    no_visits = False
-    try:
-        with open("visited.txt", "r+") as f:
-            if len(VISITED) == 0:
-                # load visited from backup file
-                no_visits = True
-                for line in f:
-                    VISITED.add(line.rstrip())
-            # print(VISITED)
-            if(urldefrag(url)[0] in VISITED):
-                LOGGER.info("URL has been visited, skipping")
-                return list()
-            if(urlparse(url).hostname in BLACKLIST):
-                LOGGER.info("URL in blacklist, skipping")
-                return list()
-            if(resp.status != 200):
-                LOGGER.info(f"{resp.status} status at {resp.url} : {resp.error}")
-                return list()
-            f.write(urldefrag(url)[0] + "\n")            
-    except FileNotFoundError:
-        with open('visited.txt', 'w') as f:
-            print("Created visited.txt")
-            f.write(urldefrag(url)[0] + "\n")
-    VISITED.add(urldefrag(url)[0])
+    LOGGER.info("Extracting : " + url)
 
-    if no_visits:
-        # load (if restarted)
-        try:
-            # load longest page from backup file
-            with open("longest-page.json", "r") as f1:
-                LONGEST_PAGE = json.load(f1)
-            # load word frequencies
-            with open("word-frequencies.json", "r") as f2:
-                WORD_FREQ = json.load(f2)
-            # load subdomains
-            with open("subdomains.json", 'r') as f3:
-                raw_dict = json.load(f3)
-                for subdomain, unique_pages in raw_dict.items():
-                    SUBDOMAINS[subdomain] = set(unique_pages)
-            # load blacklist
-            with open("blacklist.txt", 'r') as f4:
-                file_content = f4.read().splitlines()
-                BLACKLIST =  set(file_content)
-        except FileNotFoundError:
-            pass
+    parsed = urlparse(url)
+    if(url in VISITED):
+        LOGGER.info("URL has been visited, skipping")
+        return list()
+    for path in BLACKLIST_PATH:
+        if path in parsed.path:
+            LOGGER.info("URL in blacklist, skipping")
+            return list()
+    if(resp.status != 200):
+        LOGGER.info(f"{resp.status} status at {resp.url} : {resp.error}")
+        return list()
     
-        try:
-            # load simhashes
-            with open("simhashes.json", "r") as f5:
-                HASH_DICT = dict(json.load(f5))
-                HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in HASH_DICT.items()])
-        except FileNotFoundError:
-            pass
+    VISITED.add(url)
 
     # avoid crawling large files
     try:
@@ -149,24 +114,30 @@ def extract_next_links(url, resp):
     LOGGER.info("URL has " + str(byte_count) + " bytes")
 
     # parse with lxml
-    tree = html.fromstring(content)
-    etree.strip_elements(tree, 'script', 'style', 'template', 'meta', 'svg', 'embed', 'object', 'iframe', 'canvas', 'img')
-    
-    text_content = tree.text_content()
+    text_content = []
+    try:
+        content = content.strip()
+        tree = html.fromstring(content)
+        etree.strip_elements(tree, 'script', 'style', 'template', 'meta', 'svg', 'embed', 'object', 'iframe', 'canvas', 'img')
+        text_content = tree.text_content()
+    except Exception as e:
+        LOGGER.info(f"Probably: lxml.etree.ParserError: Document is empty: {e}")
+        return list()
+
+    # get hash
     current_hash = Simhash(text_content)
-    if HASH_INDEX.get_near_dups(current_hash):
+    similar_hash = HASH_INDEX.get_near_dups(current_hash)
+    if similar_hash:
         HASH_INDEX.add(url, current_hash)
-        HASH_DICT[urldefrag(url)[0]] = current_hash.value
+        HASH_DICT[url] = current_hash.value
         LOGGER.info("URL is similar to another")
         return list()
     HASH_INDEX.add(url, current_hash)
-    HASH_DICT[urldefrag(url)[0]] = current_hash.value
+    HASH_DICT[url] = current_hash.value
     
     # track longest page based on number of words
     words = text_content.split()
     word_count = len(words)
-    # if word_count == 0:
-    #     return list()
     if word_count <= 100:
         # probably insignificant data
         return list()
@@ -185,12 +156,19 @@ def extract_next_links(url, resp):
                 WORD_FREQ[word] += 1
     
     # write report every n links parsed
-    if LINKS_PARSED % 1 == 0:
+    if LINKS_PARSED % 100 == 0:
         write_report()
     LINKS_PARSED += 1
 
     # get links
-    links = set([urljoin(url, link) for link in tree.xpath('//a/@href')])
+    links = set()
+    # links = set([urljoin(url, link) for link in tree.xpath('//a/@href')])
+
+    for link in tree.xpath('//a/@href'):
+        try:
+            links.add(urljoin(url, link))
+        except Exception as e:
+            LOGGER.debug(f"Some invalid link {link} with error: {e}.")
 
     return list(links)
 
@@ -202,7 +180,7 @@ def is_valid(url):
     global DOMAINS, SUBDOMAINS
     
     try:
-        parsed = urlparse(url, allow_fragments=False)
+        parsed = urlparse(url)
         if parsed.scheme not in set(["http", "https"]) or \
             re.match(
                 r".*\.(css|js|bmp|gif|img|jpe?g|ico"
@@ -222,11 +200,7 @@ def is_valid(url):
         if parsed.hostname not in DOMAINS:
             if parsed.hostname not in SUBDOMAINS:
                 SUBDOMAINS[parsed.hostname] = set()
-            SUBDOMAINS[parsed.hostname].add(urldefrag(url)[0])
-            if len(SUBDOMAINS[parsed.hostname]) > MAX_PAGES_PER_SUBDOMAIN:
-                BLACKLIST.add(parsed.hostname)
-                LOGGER.info(f"Added {parsed.hostname} to the blacklist.")
-                return False
+            SUBDOMAINS[parsed.hostname].add(url)
         return True
 
     except TypeError:
@@ -241,9 +215,16 @@ def sorted_frequency(dictionary):
 def sorted_alphabetical(dictionary):
     return {key: len(dictionary[key]) for key in sorted(dictionary)}
 
+def generate_simhash(url, words):
+    global HASH_DICT, HASH_INDEX
+    hash = {k:sum(1 for _ in g) for k, g in groupby(sorted(words))}
+    
+    HASH_INDEX.add(hash)
+    HASH_DICT[url] = hash
+
 
 def write_report():
-    global VISITED, BLACKLIST, LONGEST_PAGE, WORD_FREQ,  \
+    global VISITED, LONGEST_PAGE, WORD_FREQ,  \
         LINKS_PARSED, SUBDOMAINS
     with open("report.txt", 'w') as f:
         f.write(f"Unique Pages: {len(VISITED)}\n")
@@ -265,17 +246,63 @@ def write_report():
     with open("longest-page.json", 'w') as f1, \
         open("word-frequencies.json", 'w') as f2, \
         open("subdomains.json", 'w') as f3, \
-        open("blacklist.txt", 'w') as f4:
+        open("visited.txt", 'w') as f4, \
+        open("simhashes.json", "w") as f5:
         
         json.dump(LONGEST_PAGE, f1)
         json.dump(WORD_FREQ, f2)
         json.dump({k: list(v) for k, v in SUBDOMAINS.items()}, f3)
-        for link in BLACKLIST:
-            f4.write(link + "\n")
-    
-    with open("visited.txt", 'w') as f5:
         for link in VISITED:
-            f5.write(link + "\n")
+            f4.write(link + "\n")
+        json.dump(HASH_DICT, f5)
 
-    with open("simhashes.json", "w") as f:
-        json.dump(HASH_DICT, f)
+
+def load_data():
+    global LONGEST_PAGE, WORD_FREQ, SUBDOMAINS, HASH_DICT, \
+      HASH_INDEX, LOADED_DATA, VISITED
+    
+    LOADED_DATA = True
+    print("Loading backup data")
+
+    try:
+        with open("visited.txt", "r") as f:
+            # load visited from backup file
+            for line in f:
+                VISITED.add(line.rstrip())
+    except FileNotFoundError:
+        pass
+    
+    try:
+        # load longest page from backup file
+        with open("longest-page.json", "r") as f1:
+            LONGEST_PAGE = json.load(f1)
+    except FileNotFoundError:
+        pass
+    
+    try:
+        # load word frequencies
+        with open("word-frequencies.json", "r") as f2:
+            WORD_FREQ = json.load(f2)
+    except FileNotFoundError:
+        pass
+    
+    try:
+        # load subdomains
+        with open("subdomains.json", 'r') as f3:
+            raw_dict = json.load(f3)
+            for subdomain, unique_pages in raw_dict.items():
+                SUBDOMAINS[subdomain] = set(unique_pages)
+    except FileNotFoundError:
+        pass
+    
+    try:
+        # load simhashes
+        with open("simhashes.json", "r") as f5:
+            HASH_DICT = dict(json.load(f5))
+            HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in HASH_DICT.items()])
+    except FileNotFoundError:
+        pass
+
+@atexit.register
+def last_report():
+    write_report()
