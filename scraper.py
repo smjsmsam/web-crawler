@@ -10,7 +10,7 @@ from utils import get_logger
 LOGGER = get_logger("SCRAPER")
 VISITED = set()
 HASH_DICT = {}
-HASH_INDEX = SimhashIndex({}, k=5)
+HASH_INDEX = SimhashIndex({}, k=3)
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
@@ -91,6 +91,7 @@ def extract_next_links(url, resp):
                 return list()
             if(urlparse(url).hostname in BLACKLIST):
                 LOGGER.info("URL in blacklist, skipping")
+                return list()
             if(resp.status != 200):
                 LOGGER.info(f"{resp.status} status at {resp.url} : {resp.error}")
                 return list()
