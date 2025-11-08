@@ -20,6 +20,10 @@ LONGEST_PAGE = ["", 0]
 LINKS_PARSED = 0
 LOADED_DATA = False
 
+BLACKLIST = set()
+PATH_COUNT = dict()
+MAX_PATH_SEGMENT_COUNT = 200
+MAX_PATH_COUNT = 150
 
 DOMAINS = ["ics.uci.edu",
            "cs.uci.edu",
@@ -74,27 +78,34 @@ def extract_next_links(url, resp):
     #         resp.raw_response.url: the url, again
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
-    global VISITED, LONGEST_PAGE, STOP_WORDS, WORD_FREQ,  \
-        LINKS_PARSED, SUBDOMAINS, HASH_DICT, HASH_INDEX, LOGGER
+    global VISITED, LONGEST_PAGE, STOP_WORDS, WORD_FREQ, \
+        LINKS_PARSED, SUBDOMAINS, HASH_DICT, HASH_INDEX, LOGGER \
     
     if LOADED_DATA == False and len(VISITED) == 0:
         load_data()
 
     LOGGER.info("Extracting : " + url)
 
+    dequery = urlparse(url.split("?")[0])  # url is already defragged
     parsed = urlparse(url)
     if(url in VISITED):
         LOGGER.info("URL has been visited, skipping")
         return list()
+
+    VISITED.add(url)
     for path in BLACKLIST_PATH:
         if path in parsed.path:
             LOGGER.info("URL in blacklist, skipping")
             return list()
+    if check_blacklist(dequery):
+        LOGGER.info("URL in blacklist or just added to the blacklist, skipping")
+        return list()
+    
     if(resp.status != 200):
         LOGGER.info(f"{resp.status} status at {resp.url} : {resp.error}")
         return list()
     
-    VISITED.add(url)
+    # VISITED.add(url)
 
     # avoid crawling large files
     try:
@@ -121,7 +132,8 @@ def extract_next_links(url, resp):
         etree.strip_elements(tree, 'script', 'style', 'template', 'meta', 'svg', 'embed', 'object', 'iframe', 'canvas', 'img')
         text_content = tree.text_content()
     except Exception as e:
-        LOGGER.info(f"Probably: lxml.etree.ParserError: Document is empty: {e}")
+        # lxml.etree.ParserError: Document is empty usually
+        LOGGER.info(f"LXML error: {e}")
         return list()
 
     # get hash
@@ -201,6 +213,9 @@ def is_valid(url):
             if parsed.hostname not in SUBDOMAINS:
                 SUBDOMAINS[parsed.hostname] = set()
             SUBDOMAINS[parsed.hostname].add(url)
+        dequery = urlparse(url.split("?")[0])  # url is already defragged
+        if is_blacklisted(dequery):
+            return False
         return True
 
     except TypeError:
@@ -222,10 +237,50 @@ def generate_simhash(url, words):
     HASH_INDEX.add(hash)
     HASH_DICT[url] = hash
 
+def check_blacklist(dequery):
+    global BLACKLIST, MAX_PATH_COUNT, MAX_PATH_SEGMENT_COUNT, PATH_COUNT
+    domain = dequery.netloc
+    path = dequery.path.strip("/")
+    path_segments = path.split("/") if path else []
+    blacklisted = False
+
+    if path_segments and "." in path_segments[-1]:
+      path_segments = path_segments[:-1]
+
+    modified_path = domain
+    for p in path_segments:
+        PATH_COUNT[p] = PATH_COUNT.get(p, 0) + 1
+        if PATH_COUNT.get(p, 0) > MAX_PATH_SEGMENT_COUNT:
+            BLACKLIST.add(p)
+            blacklisted = True
+        modified_path += "/" + p
+        PATH_COUNT[modified_path] = PATH_COUNT.get(modified_path, 0) + 1
+        if PATH_COUNT.get(modified_path, 0) > MAX_PATH_COUNT:
+            BLACKLIST.add(modified_path)
+            blacklisted = True
+    return blacklisted
+
+
+def is_blacklisted(dequery):
+    global BLACKLIST
+    domain = dequery.netloc
+    path = dequery.path.strip("/")
+    path_segments = path.split("/") if path else []
+    if path_segments and "." in path_segments[-1]:
+      path_segments = path_segments[:-1]
+    modified_path = domain
+    for p in path_segments:
+        if p in BLACKLIST:
+            return True
+        modified_path += "/" + p
+        if modified_path in BLACKLIST:
+            return True
+    return False
+
 
 def write_report():
     global VISITED, LONGEST_PAGE, WORD_FREQ,  \
-        LINKS_PARSED, SUBDOMAINS
+        LINKS_PARSED, SUBDOMAINS, BLACKLIST
     with open("report.txt", 'w') as f:
         f.write(f"Unique Pages: {len(VISITED)}\n")
         f.write("-----------\n")
@@ -247,14 +302,18 @@ def write_report():
         open("word-frequencies.json", 'w') as f2, \
         open("subdomains.json", 'w') as f3, \
         open("visited.txt", 'w') as f4, \
-        open("simhashes.json", "w") as f5:
-        
-        json.dump(LONGEST_PAGE, f1)
+        open("simhashes.json", "w") as f5, \
+        open("blacklist.txt", "w") as f6:
+
+        if (LONGEST_PAGE[1] != 0):
+            json.dump(LONGEST_PAGE, f1)
         json.dump(WORD_FREQ, f2)
         json.dump({k: list(v) for k, v in SUBDOMAINS.items()}, f3)
         for link in VISITED:
             f4.write(link + "\n")
         json.dump(HASH_DICT, f5)
+        for link in BLACKLIST:
+            f6.write(link + "\n")
 
 
 def load_data():
@@ -278,6 +337,8 @@ def load_data():
             LONGEST_PAGE = json.load(f1)
     except FileNotFoundError:
         pass
+    except json.JSONDecodeError:
+        pass
     
     try:
         # load word frequencies
@@ -296,6 +357,14 @@ def load_data():
         pass
     
     try:
+        # load blacklist
+        with open("blacklist.txt", 'r') as f4:
+            for link in f4:
+                BLACKLIST.add(link.rstrip())
+    except FileNotFoundError:
+        pass
+
+    try:
         # load simhashes
         with open("simhashes.json", "r") as f5:
             HASH_DICT = dict(json.load(f5))
@@ -305,4 +374,5 @@ def load_data():
 
 @atexit.register
 def last_report():
+    print("Writing the last report\n\n\n")
     write_report()
