@@ -1,19 +1,17 @@
 import atexit
-from itertools import groupby
 import re
 from urllib.parse import urljoin, urlparse, urldefrag
 from lxml import html, etree
 import time
-from simhash import Simhash, SimhashIndex
 import json
 from utils import get_logger
-import numpy as np
 
 
 LOGGER = get_logger("SCRAPER")
 VISITED = set()
-HASH_DICT = {}
-HASH_INDEX = SimhashIndex({}, k=3)
+HASH_INDEX = []
+HASH_BITS = 1024
+HASH_THRESHOLD = 10
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
@@ -79,7 +77,7 @@ def extract_next_links(url, resp):
     #         resp.raw_response.content: the content of the page!
     # Return a list with the hyperlinks (as strings) scrapped from resp.raw_response.content
     global VISITED, LONGEST_PAGE, STOP_WORDS, WORD_FREQ, \
-        LINKS_PARSED, SUBDOMAINS, HASH_DICT, HASH_INDEX, LOGGER \
+        LINKS_PARSED, SUBDOMAINS, LOGGER
     
     if LOADED_DATA == False and len(VISITED) == 0:
         load_data()
@@ -104,8 +102,6 @@ def extract_next_links(url, resp):
     if(resp.status != 200):
         LOGGER.info(f"{resp.status} status at {resp.url} : {resp.error}")
         return list()
-    
-    # VISITED.add(url)
 
     # avoid crawling large files
     try:
@@ -135,17 +131,6 @@ def extract_next_links(url, resp):
         # lxml.etree.ParserError: Document is empty usually
         LOGGER.info(f"LXML error: {e}")
         return list()
-
-    # get hash
-    current_hash = Simhash(text_content)
-    similar_hash = HASH_INDEX.get_near_dups(current_hash)
-    if similar_hash:
-        HASH_INDEX.add(url, current_hash)
-        HASH_DICT[url] = current_hash.value
-        LOGGER.info("URL is similar to another")
-        return list()
-    HASH_INDEX.add(url, current_hash)
-    HASH_DICT[url] = current_hash.value
     
     # track longest page based on number of words
     words = text_content.split()
@@ -157,25 +142,36 @@ def extract_next_links(url, resp):
         LONGEST_PAGE = [url, word_count]
     LOGGER.info("URL has " + str(word_count) + " words")
     
-    # generate total (across domains) list of common words ordered by frequency
+    # generate common words ordered by frequency
+    page_word_freq = dict()
     for word in words:
         word = word.lower()
         if word not in STOP_WORDS and word.isalnum():
-            val = WORD_FREQ.get(word)
-            if val == None:
-                WORD_FREQ[word] = 1
+            if word in page_word_freq:
+                page_word_freq[word] += 1
             else:
-                WORD_FREQ[word] += 1
+                page_word_freq[word] = 1
     
-    # write report every n links parsed
+    # get hash
+    current_hash = generate_simhash(page_word_freq)
+    if is_similar(current_hash):
+        LOGGER.info("URL is similar to another")
+        return list()
+    
+    # update global (across domains) word frequencies
+    for word in page_word_freq:
+        if word in WORD_FREQ:
+            WORD_FREQ[word] += 1
+        else:
+            WORD_FREQ[word] = 1
+
+    # write report every 100 links parsed
     if LINKS_PARSED % 100 == 0:
         write_report()
     LINKS_PARSED += 1
 
     # get links
     links = set()
-    # links = set([urljoin(url, link) for link in tree.xpath('//a/@href')])
-
     for link in tree.xpath('//a/@href'):
         try:
             links.add(urljoin(url, link))
@@ -230,12 +226,60 @@ def sorted_frequency(dictionary):
 def sorted_alphabetical(dictionary):
     return {key: len(dictionary[key]) for key in sorted(dictionary)}
 
-def generate_simhash(url, words):
-    global HASH_DICT, HASH_INDEX
-    hash = {k:sum(1 for _ in g) for k, g in groupby(sorted(words))}
+
+def generate_hash(word):
+    global HASH_BITS
+    # generate hash within HASH_BITS size
+    result = 0
+    primes = [131, 137, 149, 157, 163, 167, 173, 179]
+
+    for i, letter in enumerate(word):
+        prime = primes[i % len(primes)]
+        result ^= (result * prime + ord(letter) * (i + 1)) & ((1 << HASH_BITS) - 1)
     
-    HASH_INDEX.add(hash)
-    HASH_DICT[url] = hash
+    # bit mixing
+    result ^= (result >> 33)
+    result *= 0xff51afd7ed558ccd
+    result ^= (result >> 33)
+    result *= 0xc4ceb9fe1a85ec53
+    result ^= (result >> 33)
+    return result & ((1 << HASH_BITS) - 1)
+
+
+def generate_simhash(word_freq):
+    global HASH_BITS
+    
+    # update HASH_BITS-sized vector depending on hash value of each word
+    vector = [0] * HASH_BITS
+    for word in list(word_freq.keys()):
+        h = generate_hash(word)
+        for i in range(HASH_BITS):
+            # add weight to corresponding bit if hash = 1, else subtract
+            if h & (1 << i):
+                vector[i] += word_freq[word]
+            else:
+                vector[i] -= word_freq[word]
+
+    # generate HASH_BITS-sized fingerprint
+    simhash = 0
+    for i in range(HASH_BITS):
+        if vector[i] >= 0:
+            simhash |= (1 << i)
+    return simhash
+
+
+def is_similar(simhash):
+    global HASH_INDEX, HASH_THRESHOLD
+    
+    for h in HASH_INDEX:
+        # fraction of bits that are the same / all n bits of representation
+        differences = bin(simhash ^ h)
+        if differences.count('1') <= HASH_THRESHOLD:
+            HASH_INDEX.append(simhash)
+            return True
+    HASH_INDEX.append(simhash)
+    return False
+
 
 def check_blacklist(dequery):
     global BLACKLIST, MAX_PATH_COUNT, MAX_PATH_SEGMENT_COUNT, PATH_COUNT
@@ -302,22 +346,22 @@ def write_report():
         open("word-frequencies.json", 'w') as f2, \
         open("subdomains.json", 'w') as f3, \
         open("visited.txt", 'w') as f4, \
-        open("simhashes.json", "w") as f5, \
-        open("blacklist.txt", "w") as f6:
-
+        open("simhashes.txt", 'w') as f5, \
+        open("blacklist.txt", 'w') as f6:
         if (LONGEST_PAGE[1] != 0):
             json.dump(LONGEST_PAGE, f1)
         json.dump(WORD_FREQ, f2)
         json.dump({k: list(v) for k, v in SUBDOMAINS.items()}, f3)
         for link in VISITED:
             f4.write(link + "\n")
-        json.dump(HASH_DICT, f5)
+        for simhash in HASH_INDEX:
+            f5.write(str(simhash) + "\n")
         for link in BLACKLIST:
             f6.write(link + "\n")
 
 
 def load_data():
-    global LONGEST_PAGE, WORD_FREQ, SUBDOMAINS, HASH_DICT, \
+    global LONGEST_PAGE, WORD_FREQ, SUBDOMAINS, \
       HASH_INDEX, LOADED_DATA, VISITED
     
     LOADED_DATA = True
@@ -366,9 +410,9 @@ def load_data():
 
     try:
         # load simhashes
-        with open("simhashes.json", "r") as f5:
-            HASH_DICT = dict(json.load(f5))
-            HASH_INDEX = SimhashIndex([(url, Simhash(text_content)) for url, text_content in HASH_DICT.items()])
+        with open("simhashes.txt", 'r') as f5:
+            for simhash in f5:
+                HASH_INDEX.append(int(simhash.rstrip()))
     except FileNotFoundError:
         pass
 
