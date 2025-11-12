@@ -10,8 +10,8 @@ from utils import get_logger
 LOGGER = get_logger("SCRAPER")
 VISITED = set()
 HASH_INDEX = []
-HASH_BITS = 1024
-HASH_THRESHOLD = 10
+HASH_BITS = 64
+HASH_THRESHOLD = 5
 SUBDOMAINS = dict()
 WORD_FREQ = dict()
 LONGEST_PAGE = ["", 0]
